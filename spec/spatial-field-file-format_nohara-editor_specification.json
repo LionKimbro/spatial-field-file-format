@@ -1,0 +1,1222 @@
+{
+  "spec_version": "0.1",
+  "spec_name": "Infinite Grid Text+Diagram Editor",
+  "codename": "Medium2",
+  "intent": {
+    "one_sentence": "A pygame-based editor for composing text and structural diagrams on an infinite 2D grid, with native hyperlink-like spatial jumps across pages and documents, plus an integrated 16x16 icon/glyph editor.",
+    "design_thesis": [
+      "Spatial organization is primary; linear text flow is a special case within a 2D symbolic world.",
+      "Text is always legible: diagram primitives are wireframe-only and render behind the text layer.",
+      "Two coordinate systems avoid haunted APIs: CellPos for text (8x16) and NodePos for icons/shapes (16x16).",
+      "A small, semantically meaningful color set (4) is preferred over arbitrary RGB."
+    ],
+    "non_goals_initial": [
+      "Rich text styling beyond the 4 semantic colors (no font families, sizes, italics/bold in v0).",
+      "Filled shapes (explicitly disallowed).",
+      "Complex vector graphics features (gradients, bezier curves, layers > 2).",
+      "Real-time collaborative editing (future).",
+      "Full markdown/HTML import/export (future)."
+    ]
+  },
+  "technology": {
+    "language": "Python",
+    "gui": {
+      "library": "pygame",
+      "rationale": [
+        "Fast path to a working world with total control over rendering and input.",
+        "Simple event loop with predictable performance characteristics.",
+        "Well-suited to blitting bitmap glyph atlases and drawing wireframe primitives."
+      ]
+    },
+    "rendering_pipeline_style": "2D blit + primitive line drawing (pygame.draw), with camera transform and view culling",
+    "platforms_targeted": [
+      "Windows",
+      "Linux",
+      "macOS"
+    ]
+  },
+  "core_concepts": {
+    "infinite_world": {
+      "description": "The editor presents an unbounded 2D world. Only visible content in the current viewport is rendered.",
+      "world_space": "Discrete grid spaces (CellPos and NodePos) mapped to pixels through a camera transform.",
+      "viewport": {
+        "camera": "A 2D camera controlling pan and zoom.",
+        "zoom_behavior": "Zoom scales the pixel mapping of grid units; snapping and selection remain in discrete grid coordinates.",
+        "panning_behavior": "Pan moves the camera origin in pixel space; mapping to grid positions remains stable."
+      }
+    },
+    "two_coordinate_systems": {
+      "CellPos": {
+        "name": "CellPos",
+        "unit_pixels": {
+          "w": 8,
+          "h": 16
+        },
+        "domain": [
+          "Text glyph placement",
+          "Caret movement",
+          "Text selection ranges",
+          "Clipboard operations (text layer)"
+        ],
+        "origin_definition": "CellPos(0,0) maps to the top-left of the world coordinate origin.",
+        "pixel_mapping": {
+          "x_pixels": "cell_x * 8",
+          "y_pixels": "cell_y * 16"
+        }
+      },
+      "NodePos": {
+        "name": "NodePos",
+        "unit_pixels": {
+          "w": 16,
+          "h": 16
+        },
+        "domain": [
+          "Icons (16x16)",
+          "Diagram shapes (lines, rectangles, ovals/circles)",
+          "Hypertext anchors and jump regions",
+          "Non-text structural objects"
+        ],
+        "origin_definition": "NodePos(0,0) maps to the top-left of the world coordinate origin.",
+        "pixel_mapping": {
+          "x_pixels": "node_x * 16",
+          "y_pixels": "node_y * 16"
+        }
+      },
+      "mapping_between": {
+        "node_to_cell_top_left": {
+          "cell_x": "2 * node_x",
+          "cell_y": "node_y"
+        },
+        "cell_to_node_floor": {
+          "node_x": "floor(cell_x / 2)",
+          "node_y": "cell_y"
+        },
+        "invariant": "Every NodePos cell contains exactly two CellPos columns at the same y."
+      },
+      "api_design_decision": {
+        "decision": "Never overload x/y meaning. APIs explicitly accept either CellPos or NodePos.",
+        "motivation": [
+          "Avoid half-cell offsets and confusing selection math.",
+          "Keep text editing semantics pure and grid-aligned.",
+          "Keep diagrams structurally aligned on a stable 16x16 node grid."
+        ]
+      }
+    },
+    "two_layer_model": {
+      "layer_count": 2,
+      "layers": [
+        {
+          "layer_id": "node_layer",
+          "z_order": 0,
+          "name": "Icon & Shape Layer",
+          "coordinate_space": "NodePos",
+          "contents": [
+            "Icons",
+            "Lines (optionally with arrowheads)",
+            "Rectangles (wireframe only)",
+            "Ovals/circles (wireframe only)",
+            "Hyper-anchors + jump regions (structural overlays)"
+          ],
+          "rendering_rule": "Rendered first (behind text)."
+        },
+        {
+          "layer_id": "text_layer",
+          "z_order": 1,
+          "name": "Text Layer",
+          "coordinate_space": "CellPos",
+          "contents": [
+            "Characters (8x16 glyphs)",
+            "Whitespace cells (implicit)"
+          ],
+          "rendering_rule": "Rendered last and always visible (never occluded)."
+        }
+      ],
+      "shape_fill_rule": {
+        "filled_shapes_allowed": false,
+        "rationale": [
+          "Ensure text remains legible regardless of diagram density.",
+          "Keep the medium diagrammatic and structural rather than painterly.",
+          "Constrain complexity and feature creep."
+        ]
+      }
+    },
+    "text_domains": {
+      "description": "The world contains two distinct kinds of text with different semantics.",
+      "background_text": {
+        "description": "Free spatial glyphs placed directly in CellPos space.",
+        "storage": "Sparse CellPos map",
+        "semantics": [
+          "Spatial labeling",
+          "Annotations",
+          "Poetic or diagrammatic placement"
+        ]
+      },
+      "pad_text": {
+        "description": "Structured flowing text owned by a TextPad node object.",
+        "storage": "Inline text_lines array in text_pad object",
+        "semantics": [
+          "Conventional writing",
+          "Parser-friendly blocks",
+          "Movable as a unit"
+        ]
+      }
+    }
+  },
+  "visual_language": {
+    "colors": {
+      "palette_size": 4,
+      "color_ids": [
+        "primary",
+        "auxiliary",
+        "semantic",
+        "alert"
+      ],
+      "semantics": {
+        "primary": "Neutral or default content (generally white/black depending on background).",
+        "auxiliary": "Structure, scaffolding, guidance (generally blue).",
+        "semantic": "Meaningful highlights, flow, 'good' or 'active' semantics (generally green).",
+        "alert": "Warnings, errors, danger, critical markers (generally red)."
+      },
+      "implementation_note": "Exact RGB values are theme-dependent; only the 4 IDs are stored in documents."
+    },
+    "themes": {
+      "supported": true,
+      "theme_components": [
+        "background color",
+        "grid color",
+        "primary color",
+        "auxiliary color",
+        "semantic color",
+        "alert color"
+      ],
+      "theme_storage": "Theme may be a user preference; documents store color IDs not RGB."
+    },
+    "grid_visualization": {
+      "cell_grid": {
+        "unit": "CellPos",
+        "draw_default": true,
+        "purpose": "Text placement and fine-grained spatial alignment."
+      },
+      "node_grid": {
+        "unit": "NodePos",
+        "draw_default": true,
+        "purpose": "Diagram alignment and icon placement."
+      },
+      "grid_toggle": "User can toggle cell grid and/or node grid visibility."
+    }
+  },
+  "glyphs_and_icons": {
+    "glyph_sizes": {
+      "text_glyph": {
+        "w": 8,
+        "h": 16
+      },
+      "icon_glyph": {
+        "w": 16,
+        "h": 16
+      }
+    },
+    "font_and_icon_atlases": {
+      "text_font_atlas": {
+        "description": "Bitmap font for rendering standard characters as 8x16 bitmaps.",
+        "indexing": "By Unicode codepoint (or an internal remap table).",
+        "fallback": "Missing glyph renders as a visible placeholder box."
+      },
+      "icon_atlas": {
+        "description": "Developer-authored 16x16 icons, stored with the document.",
+        "indexing": "By private-use Unicode codepoints mapped to icon IDs."
+      }
+    },
+    "private_use_unicode_policy": {
+      "enabled": true,
+      "purpose": "Allow developer-defined glyphs to appear inline as characters.",
+      "storage": {
+        "document_stores_icons": true,
+        "document_stores_mapping": true
+      },
+      "codepoint_ranges": {
+        "notes": [
+          "Specific ranges to be finalized; common private-use blocks are U+E000–U+F8FF (BMP) and supplementary private-use planes.",
+          "The spec stores which codepoints are used; the editor reserves/manages them."
+        ],
+        "range_policy": "Configurable; document declares what it uses."
+      }
+    },
+    "glyph_rendering_rules": {
+      "text_layer": {
+        "char": "Render 8x16 glyph at CellPos top-left.",
+        "spacing": "Each CellPos is exactly one character slot; no half-cell packing."
+      },
+      "node_layer": {
+        "icon": "Render 16x16 icon at NodePos top-left."
+      }
+    }
+  },
+  "document_model": {
+    "document_identity": {
+      "guid": {
+        "type": "UUID/GUID string",
+        "required": true,
+        "purpose": "Stable identity to enable cross-document jumps by GUID."
+      },
+      "title": {
+        "type": "string",
+        "required": false
+      }
+    },
+    "document_hierarchy": {
+      "description": "A document is a hierarchy of pages (and optionally subpages).",
+      "tree": {
+        "nodes": "pages",
+        "edges": "parent-child relationships",
+        "root": "page_root"
+      },
+      "page_identity": {
+        "page_id": "Unique within document; stable string or UUID."
+      }
+    },
+    "pages": {
+      "page_data": {
+        "text_layer": {
+          "storage": "Sparse map keyed by CellPos",
+          "value": "TextCell"
+        },
+        "node_layer": {
+          "storage": "Object list or indexed maps keyed by NodePos and object ids",
+          "value": "NodeObject"
+        }
+      },
+      "page_bounds": {
+        "bounded": false,
+        "note": "Pages are conceptually infinite like the world; content is sparse."
+      }
+    },
+    "sparse_storage": {
+      "rationale": [
+        "World is infinite; only store non-empty cells/objects.",
+        "Enables large documents without allocating huge arrays."
+      ],
+      "text_layer_representation": {
+        "type": "map",
+        "key": "CellPos as (x,y) ints",
+        "value": {
+          "glyph": "unicode codepoint",
+          "color": "one of 4 color IDs"
+        }
+      }
+    }
+  },
+  "node_objects": {
+    "object_id_policy": {
+      "object_id": "Unique stable id (UUID or monotonic integer) per NodeObject for selection and undo.",
+      "object_id_scope": "Per page"
+    },
+    "object_types": [
+      "icon",
+      "line",
+      "rect",
+      "oval",
+      "anchor",
+      "jump_region",
+      "text_pad"
+    ],
+    "common_fields": {
+      "type": "one of object_types",
+      "object_id": "unique id",
+      "color": "primary|auxiliary|semantic|alert",
+      "z_within_node_layer": "Optional ordering among node objects (default: insertion order).",
+      "metadata": "Arbitrary key/value (future extensibility)."
+    },
+    "icon": {
+      "description": "A 16x16 bitmap glyph instance placed on the NodePos grid.",
+      "fields": {
+        "node_pos": "NodePos",
+        "icon_codepoint": "Private-use Unicode codepoint",
+        "flip_x": false,
+        "flip_y": false,
+        "rotation": 0
+      }
+    },
+    "line": {
+      "description": "Wireframe straight line between NodePos endpoints, optionally with arrowheads.",
+      "fields": {
+        "a": "NodePos",
+        "b": "NodePos",
+        "arrow": {
+          "enum": [
+            "none",
+            "end",
+            "both"
+          ],
+          "meaning": [
+            "none: no arrowheads",
+            "end: arrow at b end",
+            "both: arrow at both ends"
+          ]
+        }
+      }
+    },
+    "rect": {
+      "description": "Wireframe rectangle defined by two NodePos corners (axis-aligned).",
+      "fields": {
+        "a": "NodePos",
+        "b": "NodePos",
+        "filled": false
+      }
+    },
+    "oval": {
+      "description": "Wireframe oval/circle defined by bounding box corners or by center+radius (to be chosen).",
+      "representation_choice": {
+        "preferred": "bounding_box",
+        "options": [
+          "bounding_box",
+          "center_radius"
+        ],
+        "note": "Bounding box fits the grid mental model and aligns with rectangles."
+      },
+      "fields_bounding_box": {
+        "a": "NodePos",
+        "b": "NodePos",
+        "filled": false
+      }
+    },
+    "anchor": {
+      "description": "A named target location for jumps, like segno/coda but spatial and general.",
+      "fields": {
+        "name": "string",
+        "target": {
+          "doc_guid": "GUID",
+          "page_id": "string",
+          "node_pos": "NodePos"
+        },
+        "visual_marker": {
+          "show_marker": true,
+          "marker_style": "icon or simple glyph (TBD)"
+        }
+      }
+    },
+    "jump_region": {
+      "description": "A region (rectangular selection in NodePos space) that triggers a jump when activated.",
+      "fields": {
+        "region": {
+          "a": "NodePos",
+          "b": "NodePos"
+        },
+        "jump_to": {
+          "doc_guid": "GUID",
+          "page_id": "string",
+          "node_pos": "NodePos",
+          "anchor_name": "optional string alternative to node_pos"
+        },
+        "activation": {
+          "methods": [
+            "click",
+            "double_click",
+            "keyboard_activate"
+          ],
+          "default": "double_click"
+        },
+        "visualization": {
+          "show_outline": true,
+          "outline_style": "wireframe rectangle (no fill)"
+        }
+      }
+    },
+    "text_pad": {
+      "description": "A structured writing region anchored to NodePos, providing a conventional flowing text field within the 2D world.",
+      "role": [
+        "Provides logical grouping for extended writing",
+        "Allows moving entire text sections as structural units",
+        "Serves as parser-friendly semantic blocks"
+      ],
+      "fields": {
+        "node_pos": "NodePos (top-left anchor of pad)",
+        "width_cells": {
+          "type": "int",
+          "default": 80,
+          "description": "Maximum line width in CellPos columns before wrapping."
+        },
+        "auto_grow_down": {
+          "type": "bool",
+          "default": true,
+          "description": "If true, pad grows downward as text exceeds current height."
+        },
+        "z_order": {
+          "type": "int",
+          "default": 0,
+          "description": "Used only when multiple pads overlap; higher z wins hit-tests."
+        },
+        "text_lines": {
+          "type": "array[string]",
+          "description": "Pad-owned text buffer; each entry is one logical line."
+        },
+        "text_coordinate_mapping": {
+          "origin_cell": "CellPos(2 * node_x, node_y)",
+          "default_flow": "left-to-right then top-to-bottom within width_cells"
+        },
+        "min_height_cells": {
+          "type": "int",
+          "default": 1,
+          "description": "Minimum vertical extent of pad text region."
+        },
+        "text_storage_policy": {
+          "type": "enum",
+          "values": [
+            "inline",
+            "cellpos_region"
+          ],
+          "default": "inline",
+          "description": "Whether pad stores its own text buffer or references CellPos entries in world text layer."
+        }
+      },
+      "text_coordinate_mapping": {
+        "origin": "CellPos(2*node_x, node_y)",
+        "description": "Pad text origin is two CellPos to the right of the NodePos anchor, aligned with top of node."
+      },
+      "visualization": {
+        "show_border": true,
+        "border_style": "wireframe rectangle in node layer",
+        "border_color": "auxiliary",
+        "show_anchor_glyph": true,
+        "anchor_glyph": "optional icon or marker at node_pos",
+        "highlight_on_proximity": true,
+        "highlight_fade_by_distance": true
+      }
+    }
+  },
+  "hypertext_and_navigation": {
+    "native_hypertextuality": {
+      "description": "Links are spatial constructs: named anchors and clickable jump regions.",
+      "inspired_by": [
+        "segno",
+        "coda"
+      ],
+      "core_primitives": [
+        "anchor (named target)",
+        "jump_region (source region that points to a target coordinate or anchor)"
+      ]
+    },
+    "cross_page_navigation": {
+      "jump_targets": [
+        "within same page",
+        "within same document, other page",
+        "other document by GUID"
+      ]
+    },
+    "document_resolver": {
+      "description": "Mechanism to locate and load documents by GUID.",
+      "policy": [
+        "If target document is loaded, jump directly.",
+        "If not loaded, attempt filesystem resolution via configured search paths.",
+        "If still not found, show an error and optionally prompt the user to locate the document."
+      ],
+      "search_paths": "User-configurable list of directories.",
+      "registry_future": "Optional registry/index file mapping GUID->path (future)."
+    },
+    "navigation_history": {
+      "enabled": true,
+      "back_forward_stack": "Maintain a stack of visited (doc_guid,page_id,node_pos,camera_state).",
+      "bookmarking": "User can bookmark anchors/locations (future)."
+    }
+  },
+  "focus_space": {
+    "description": "The editor operates in one of two mutually exclusive focus spaces: text or node. Focus space determines navigation granularity, caret behavior, selection model, and which operations are active.",
+    "spaces": {
+      "text": {
+        "coordinate_space": "CellPos",
+        "purpose": "Editing and navigating character glyphs.",
+        "active_operations": [
+          "typing",
+          "text selection",
+          "copy/cut/paste text",
+          "caret movement in CellPos"
+        ]
+      },
+      "node": {
+        "coordinate_space": "NodePos",
+        "purpose": "Editing and navigating structural objects (icons, shapes, anchors, jump regions).",
+        "active_operations": [
+          "select node objects",
+          "move node caret",
+          "activate anchors and jump regions",
+          "edit shapes and icons"
+        ]
+      }
+    },
+    "invariant": "At all times, exactly one focus space is active."
+  },
+  "editing_model": {
+    "navigation_rules": {
+      "description": "Arrow-key navigation and motion step size depend on focus space.",
+      "text_focus_navigation": {
+        "left": "CellPos(x-1, y)",
+        "right": "CellPos(x+1, y)",
+        "up": "CellPos(x, y-1)",
+        "down": "CellPos(x, y+1)"
+      },
+      "node_focus_navigation": {
+        "left": "NodePos(nx-1, ny)",
+        "right": "NodePos(nx+1, ny)",
+        "up": "NodePos(nx, ny-1)",
+        "down": "NodePos(nx, ny+1)"
+      },
+      "page_bounds": {
+        "behavior": "Navigation is not bounded; world is infinite. No clamping except by integer overflow safeguards."
+      }
+    },
+    "caret_model": {
+      "description": "Caret position and behavior depend on the current focus space.",
+      "caret_state": {
+        "focus_space": "text | node",
+        "position": "CellPos when in text focus; NodePos when in node focus"
+      },
+      "rendering": {
+        "text_focus": "Render caret as text insertion cursor aligned to CellPos grid.",
+        "node_focus": "Render caret as node highlight or crosshair aligned to NodePos grid."
+      }
+    },
+    "focus_transitions": {
+      "description": "Rules that determine when focus space switches between text and node.",
+      "text_to_node": {
+        "implicit": {
+          "trigger": "Caret moves to a CellPos that does not contain text and is not part of a contiguous text region.",
+          "action": [
+            "Switch focus_space to 'node'",
+            "Convert caret position to NodePos using floor(cell_x/2, cell_y)"
+          ]
+        },
+        "explicit": {
+          "trigger": "User presses escape or configured exit-text-mode key",
+          "action": [
+            "Switch focus_space to 'node'",
+            "Convert caret position to NodePos using floor(cell_x/2, cell_y)"
+          ]
+        }
+      },
+      "node_to_text": {
+        "implicit": {
+          "trigger": "Caret enters a CellPos that contains text while navigating in node focus",
+          "action": [
+            "Switch focus_space to 'text'",
+            "Snap caret to nearest CellPos containing text"
+          ]
+        },
+        "explicit": {
+          "trigger": "User clicks on text cell or begins typing",
+          "action": [
+            "Switch focus_space to 'text'",
+            "Set caret to clicked CellPos"
+          ]
+        }
+      },
+      "text_pad_entry_exit": {
+        "enter_pad": {
+          "trigger": [
+            "User clicks inside pad text region",
+            "Caret in node focus enters pad text bounds and user begins typing",
+            "User presses Enter while node caret is on pad anchor"
+          ],
+          "action": [
+            "Switch focus_space to 'text'",
+            "Set text_context to pad:<pad_id>",
+            "Snap caret to nearest CellPos inside pad text region"
+          ]
+        },
+        "exit_pad": {
+          "trigger": [
+            "User presses escape",
+            "User explicitly switches to node focus"
+          ],
+          "action": [
+            "Switch focus_space to 'node'",
+            "Set caret to pad node_pos"
+          ]
+        }
+      }
+    },
+    "tool_system": {
+      "description": "Modal tools operate on either CellPos (text) or NodePos (node layer).",
+      "tools_initial": [
+        "pan",
+        "select",
+        "text",
+        "place_icon",
+        "draw_line",
+        "draw_rect",
+        "draw_oval",
+        "create_anchor",
+        "create_jump_region",
+        "edit_icon_bitmap"
+      ],
+      "tool_affinity": {
+        "pan": "camera",
+        "select": "both layers (with layer targeting rules)",
+        "text": "text_layer",
+        "place_icon": "node_layer",
+        "draw_line": "node_layer",
+        "draw_rect": "node_layer",
+        "draw_oval": "node_layer",
+        "create_anchor": "node_layer",
+        "create_jump_region": "node_layer",
+        "edit_icon_bitmap": "icon_editor"
+      }
+    },
+    "layer_targeting_rules": {
+      "default": "Text layer is always visible and does not block selecting node objects unless selection tool is configured to prioritize node objects.",
+      "select_behavior": [
+        "Selection tool can be toggled between selecting text cells and selecting node objects.",
+        "A modifier key can temporarily invert the selection priority."
+      ],
+      "hit_testing": {
+        "text": "Hit-test by CellPos under cursor.",
+        "node_objects": "Hit-test by object geometry in NodePos space (line distance, rect/oval outline proximity, icon bounding box)."
+      }
+    },
+    "text_entry_rules": {
+      "automatic_entry": {
+        "description": "Typing automatically enters pad text if caret is inside pad region.",
+        "trigger": "User types while caret is over pad text region",
+        "action": [
+          "focus_space = text",
+          "text_context = pad:<pad_id>"
+        ]
+      },
+      "explicit_entry": {
+        "trigger": "User presses Enter while caret in node focus is on pad handle",
+        "action": [
+          "focus_space = text",
+          "text_context = pad:<pad_id>"
+        ]
+      },
+      "exit_rules": {
+        "trigger": "User presses Escape",
+        "action": [
+          "focus_space = node",
+          "caret_position = pad.node_pos"
+        ]
+      }
+    },
+    "text_editing": {
+      "caret": {
+        "position": "CellPos",
+        "movement": [
+          "left/right/up/down one CellPos",
+          "home/end within inferred row (future)",
+          "word jumps (future)"
+        ]
+      },
+      "selection": {
+        "type": "range in CellPos space",
+        "shape": "Rectangular or stream selection (TBD; initial rectangular is simplest in 2D).",
+        "clipboard": [
+          "copy",
+          "cut",
+          "paste"
+        ],
+        "paste_semantics": "Paste text starting at caret CellPos; supports multi-line with newlines mapping to y+1 and x reset (policy TBD)."
+      },
+      "typing": {
+        "input": "Unicode codepoints from keyboard events and IME (pygame limitations acknowledged).",
+        "color_application": "Typed glyphs receive current active color id."
+      },
+      "text_pad_editing_rules": {
+        "wrapping": {
+          "policy": "Hard wrap at width_cells",
+          "behavior": "Typing past right edge moves caret to next line at pad left column"
+        },
+        "bounds": {
+          "horizontal": "Caret cannot move outside pad width in text focus",
+          "vertical": "Caret cannot move above first pad line; pad grows downward if auto_grow_down is true"
+        },
+        "selection": {
+          "clipped_to_pad": true,
+          "note": "Text selection cannot extend outside pad bounds while in pad text_context"
+        }
+      },
+      "text_pad_navigation": {
+        "horizontal": {
+          "wrap": true,
+          "wrap_target": "next line at left column"
+        },
+        "vertical": {
+          "up_at_first_line": "stay on first line",
+          "down_at_last_line": "extend pad downward if auto_grow_down is true"
+        },
+        "arrow_keys": {
+          "confined_to_pad": true
+        }
+      }
+    },
+    "deletion_rules": {
+      "pad_text": {
+        "backspace_at_line_start": "merge with previous line (Emacs-style)",
+        "backspace_at_origin": "no-op",
+        "note": "Text editing never deletes the pad object itself."
+      },
+      "pad_object": {
+        "how_to_delete": [
+          "Switch to node focus",
+          "Move caret to pad handle (node_pos)",
+          "Press Delete"
+        ],
+        "effect": "Deletes pad object and all contained text."
+      }
+    },
+    "diagram_editing": {
+      "line": {
+        "creation": "Click-drag from NodePos a to NodePos b (snap to node grid).",
+        "arrow_mode": "Cycle none/end/both via hotkey or toolbar control.",
+        "editing": "Select endpoints and drag; line updates."
+      },
+      "rect": {
+        "creation": "Click-drag bounding box corners in NodePos.",
+        "filled": false,
+        "editing": "Drag corners; outline updates."
+      },
+      "oval": {
+        "creation": "Click-drag bounding box in NodePos.",
+        "filled": false,
+        "editing": "Drag bounding box corners; outline updates."
+      },
+      "icons": {
+        "placement": "Click to place at NodePos. Icon instance references icon_codepoint.",
+        "editing": "Select icon instance; change icon_codepoint or color; move by dragging."
+      }
+    },
+    "clipboard_behavior": {
+      "description": "Clipboard operations are confined to the active focus space.",
+      "text_focus": {
+        "copy": "Copies selected CellPos glyphs as plain text with newline separators based on y-coordinates.",
+        "cut": "Copy followed by deletion of selected text cells.",
+        "paste": {
+          "target": "Current caret CellPos",
+          "layout": "Text pasted row-by-row; if in text pad, paste is wrapped and clipped to pad width"
+        }
+      },
+      "node_focus": {
+        "copy": "Copies selected NodeObjects as structured objects with relative NodePos offsets.",
+        "cut": "Copy followed by deletion of selected NodeObjects.",
+        "paste": {
+          "target": "Current caret NodePos as anchor point",
+          "layout": "All pasted objects offset relative to caret NodePos"
+        }
+      },
+      "cross_layer_paste": {
+        "allowed": false,
+        "behavior": "Clipboard contents from one focus space cannot be pasted into the other focus space."
+      },
+      "clipboard_formats": {
+        "pad_text": {
+          "format": {
+            "type": "pad-text",
+            "columns": "int",
+            "lines": "array[string]"
+          },
+          "semantics": "Flow text with width semantics"
+        },
+        "background_text": {
+          "format": {
+            "type": "bg-text",
+            "chars_wide": "int",
+            "lines": "array[array[glyph|null]]"
+          },
+          "semantics": "Spatial glyph bitmap with null cells"
+        }
+      },
+      "paste_rules": {
+        "pad_to_background": {
+          "behavior": [
+            "Paste glyphs at insertion CellPos",
+            "Newlines reset x to paste origin column",
+            "Visual layout preserved"
+          ]
+        },
+        "background_to_pad": {
+          "behavior": [
+            "Null cells become spaces",
+            "Pad width expands if needed to fit content",
+            "Glyph layout preserved"
+          ]
+        },
+        "pad_to_pad": {
+          "behavior": [
+            "Paste lines into target pad",
+            "Expand pad width if source columns > target width"
+          ]
+        }
+      }
+    }
+  },
+  "icon_editor": {
+    "description": "Integrated 16x16 bitmap icon designer for developer-defined glyphs.",
+    "grid": {
+      "w": 16,
+      "h": 16,
+      "pixel_scale": "Editor shows each icon pixel enlarged for editing."
+    },
+    "palette": {
+      "colors": [
+        "transparent",
+        "primary",
+        "auxiliary",
+        "semantic",
+        "alert"
+      ],
+      "note": "Icon pixels may store one of the 4 semantic colors or be transparent; RGB derived from theme at render time."
+    },
+    "tools": [
+      "pencil",
+      "eraser",
+      "line",
+      "rect_outline",
+      "oval_outline",
+      "fill_not_allowed"
+    ],
+    "constraints": {
+      "filled_shapes_in_icon_editor": false,
+      "note": "Even in icon editor, prefer outlines; however pixel-level fill might be useful. This remains an open decision."
+    },
+    "icon_management": {
+      "create_new_icon": "Allocates a new private-use codepoint and blank bitmap.",
+      "duplicate_icon": "Copies bitmap to a new codepoint.",
+      "rename_icon": "Assigns a human-friendly name/label to an icon id.",
+      "delete_icon": "Removes icon definition (instances in pages become missing-glyph placeholders unless migrated)."
+    },
+    "storage": {
+      "stored_in_document": true,
+      "format": "Map from private-use codepoint to 16x16 pixel data (palette indices)."
+    }
+  },
+  "file_format": {
+    "format_name": "GridGlyph Document JSON",
+    "file_extension": ".gridglyph.json",
+    "top_level_fields": [
+      "format_version",
+      "document_guid",
+      "title",
+      "created_utc",
+      "modified_utc",
+      "icons",
+      "pages",
+      "page_tree",
+      "settings"
+    ],
+    "icons_storage": {
+      "mapping": "codepoint -> icon_definition",
+      "icon_definition": {
+        "name": "string",
+        "pixels": "16x16 array of palette entries (transparent|primary|auxiliary|semantic|alert)"
+      }
+    },
+    "pages_storage": {
+      "page": {
+        "page_id": "string",
+        "text_layer": "sparse list/map of TextCell entries",
+        "node_layer": "list of NodeObject entries",
+        "text_pad_storage": {
+          "pad_id": "object_id",
+          "text_lines": [
+            "string",
+            "string",
+            "string"
+          ],
+          "width_cells": "int"
+        }
+      }
+    },
+    "text_cell_entry": {
+      "x": "int",
+      "y": "int",
+      "glyph": "unicode codepoint string or int",
+      "color": "primary|auxiliary|semantic|alert"
+    },
+    "node_object_entry": {
+      "object_id": "string",
+      "type": "icon|line|rect|oval|anchor|jump_region",
+      "color": "primary|auxiliary|semantic|alert",
+      "fields": "type-specific payload",
+      "note": "text_pad objects store their text content inline within the node object, not in global text layer."
+    },
+    "compatibility": {
+      "forward_compat": "Unknown fields are preserved when possible; editor should round-trip extra fields.",
+      "versioning": "format_version increments with breaking changes."
+    }
+  },
+  "undo_redo": {
+    "enabled": true,
+    "model": {
+      "approach": "Command log or patch-based operations",
+      "preferred": "Event/command log for robustness and potential replay (future)",
+      "operations": [
+        "insert_text_cell",
+        "delete_text_cell",
+        "set_text_cell",
+        "add_node_object",
+        "remove_node_object",
+        "update_node_object",
+        "camera_move (optional, usually not undoable)",
+        "create_icon",
+        "update_icon_pixels",
+        "delete_icon"
+      ]
+    },
+    "granularity": {
+      "typing": "May coalesce contiguous typing into one undo step (configurable).",
+      "dragging": "Coalesce drag operations into one undo step."
+    }
+  },
+  "rendering_details": {
+    "render_order": [
+      "background",
+      "grids (optional)",
+      "node_layer objects (wireframes/icons)",
+      "text_layer glyphs"
+    ],
+    "culling": {
+      "description": "Compute visible bounds in CellPos and NodePos from camera viewport; render only within bounds.",
+      "node_bounds_from_viewport": "Compute node range for x and y based on pixel viewport / node unit size.",
+      "cell_bounds_from_viewport": "Compute cell range based on pixel viewport / cell unit size."
+    },
+    "shape_rendering": {
+      "lines": "pygame.draw.line with computed pixel endpoints (node positions).",
+      "arrowheads": "Computed small triangles/lines at endpoints; size scales with zoom (or clamps).",
+      "rect": "pygame.draw.rect with width=1 (or scaled) and no fill.",
+      "oval": "pygame.draw.ellipse with width=1 (or scaled) and no fill."
+    },
+    "zoom_and_line_thickness": {
+      "policy": "Line thickness may remain 1 pixel for crispness, or scale modestly; clamp for readability.",
+      "default": "1 pixel at all zoom levels (initial)."
+    }
+  },
+  "input_and_controls": {
+    "mouse": {
+      "pan": "Middle mouse drag or space+left drag (configurable).",
+      "zoom": "Mouse wheel zoom centered on cursor (preferred).",
+      "select": "Left drag to select (behavior depends on tool and targeting mode)."
+    },
+    "keyboard": {
+      "tool_switching": "Hotkeys for tools (TBD).",
+      "color_switching": "1-4 to set active semantic color (TBD).",
+      "navigation": {
+        "jump_activate": "Enter or double-click depending on jump_region activation.",
+        "back_forward": "Alt+Left / Alt+Right (TBD)."
+      }
+    },
+    "text_input": {
+      "note": "pygame text input/IME handling can be limited; v0 may target ASCII/basic Unicode and expand later."
+    }
+  },
+  "selection_and_hit_testing": {
+    "selection_domains": {
+      "node_focus": {
+        "selects": "NodeObjects only",
+        "selection_type": "binary per object",
+        "multi_select": true
+      },
+      "text_focus_pad": {
+        "selects": "Characters within current pad only",
+        "selection_shape": "rectangular",
+        "clipped_to_pad": true
+      },
+      "text_focus_background": {
+        "selects": "Characters in CellPos space",
+        "selection_shape": "rectangular",
+        "null_cells_included": false
+      },
+      "mixed_selection": {
+        "allowed": false,
+        "rationale": "Avoid ambiguous operations and preserve semantic clarity."
+      }
+    },
+    "node_selection": {
+      "space": "NodePos + geometry",
+      "icon_hitbox": "NodePos cell bounds (16x16) in pixels",
+      "line_hit_test": "Distance-to-segment threshold in pixels (adjust with zoom)",
+      "rect_oval_hit_test": "Distance-to-outline threshold (wireframe only)"
+    },
+    "node_selection_behavior": {
+      "space": "NodePos and object geometry",
+      "selection_units": [
+        "single NodeObject",
+        "multiple NodeObjects"
+      ],
+      "multi_select": {
+        "enabled": true,
+        "methods": [
+          "shift-click",
+          "drag selection rectangle in NodePos space"
+        ]
+      },
+      "selection_rectangle": {
+        "behavior": "Select all NodeObjects whose geometry intersects the rectangle"
+      }
+    },
+    "selection_model": {
+      "description": "Selection is always confined to the active focus space. Mixed-layer selection is not allowed.",
+      "allowed_selection_types": {
+        "text_focus": "CellPos-based text selection only",
+        "node_focus": "NodeObject and NodePos-based structural selection only"
+      },
+      "mixed_selection_policy": {
+        "allowed": false,
+        "rationale": [
+          "Avoid ambiguous operations (copy, delete, move).",
+          "Keep mental model simple: you are always editing either text or structure.",
+          "Prevent accidental structural edits while typing."
+        ]
+      }
+    },
+    "text_selection": {
+      "space": "CellPos",
+      "shape": "rectangular selection for v0",
+      "copy_format": "Plain text with newlines; optionally preserve 2D layout in a custom clipboard format (future)."
+    },
+    "text_selection_behavior": {
+      "space": "CellPos",
+      "selection_shapes": [
+        "rectangular"
+      ],
+      "default": "rectangular",
+      "range_definition": {
+        "start": "CellPos",
+        "end": "CellPos",
+        "included_cells": "All CellPos within bounding rectangle"
+      },
+      "keyboard_extension": {
+        "shift_arrow": "Extend rectangular selection in movement direction"
+      },
+      "text_pad_constraints": {
+        "when_in_pad": {
+          "selection_clipped_to_pad": true,
+          "cannot_select_background_text": true
+        }
+      }
+    }
+  },
+  "serialization_and_loading": {
+    "load_document": {
+      "by_path": true,
+      "by_guid": true,
+      "policy": "Resolver tries loaded docs then filesystem search paths then user prompt."
+    },
+    "save_document": {
+      "atomic_save": "Write temp then rename for crash safety (recommended).",
+      "modified_tracking": "Dirty flag per document and per page."
+    }
+  },
+  "performance_and_scalability": {
+    "expected_scale": {
+      "text_cells": "Sparse; potentially millions overall but only thousands visible.",
+      "node_objects": "Potentially tens of thousands overall; hundreds to thousands visible."
+    },
+    "optimizations_v0": [
+      "Viewport culling for both coordinate spaces",
+      "Pre-rendered glyph atlas surfaces",
+      "Avoid per-frame allocations in hot loops"
+    ],
+    "optimizations_future": [
+      "Chunking (spatial hash) for faster retrieval and rendering",
+      "Dirty-rect redraw or cached tiles",
+      "Optional OpenGL backend if needed"
+    ]
+  },
+  "error_handling_and_resilience": {
+    "missing_icon_codepoint": "Render placeholder and show warning indicator (alert color).",
+    "missing_document_on_jump": "Show non-fatal error, remain in current location.",
+    "corrupt_file": "Attempt partial load; report errors; preserve salvageable data."
+  },
+  "extensibility": {
+    "metadata": "NodeObjects and pages may store arbitrary metadata for future features.",
+    "future_features": [
+      "More node object types (polylines, bezier, groups)",
+      "Additional layers (if ever needed)",
+      "Richer hyperlink visuals (labels, icons)",
+      "Search across documents by GUID index",
+      "Export to images/PDF",
+      "Scripting / automation"
+    ]
+  },
+  "open_questions": {
+    "oval_representation": {
+      "question": "Represent ovals by bounding box corners vs center+radius?",
+      "default": "bounding box corners"
+    },
+    "icon_editor_fill": {
+      "question": "Should pixel-level fill (bucket tool) be allowed in icon editor even though world shapes are wireframe-only?",
+      "default": "not allowed (for coherence) but may be reconsidered for usability"
+    },
+    "text_newline_policy": {
+      "question": "How does newline behave in a 2D text world (wrap, fixed column, preserve x)?",
+      "default": "newline moves to y+1 and x=0 (classic), but 2D layout may require a different model"
+    },
+    "jump_region_activation_default": {
+      "question": "Single click vs double click vs Enter?",
+      "default": "double_click"
+    },
+    "selection_priority_ui": {
+      "question": "What is the best UX for selecting text vs node objects when text is always drawn on top?",
+      "default": "select tool has a mode toggle and a modifier key to invert priority"
+    }
+  },
+  "implementation_plan_outline": {
+    "phased_build": [
+      {
+        "phase": "P0",
+        "goal": "World + camera + grids",
+        "deliverables": [
+          "pygame window",
+          "camera pan/zoom",
+          "CellPos and NodePos conversion helpers",
+          "render cell grid and node grid toggles"
+        ]
+      },
+      {
+        "phase": "P1",
+        "goal": "Text layer MVP",
+        "deliverables": [
+          "text atlas rendering 8x16",
+          "caret movement",
+          "place characters",
+          "text selection + copy/paste"
+        ]
+      },
+      {
+        "phase": "P2",
+        "goal": "Node layer MVP",
+        "deliverables": [
+          "place icon instances",
+          "draw lines/rects/ovals wireframe",
+          "select/move/edit node objects"
+        ]
+      },
+      {
+        "phase": "P3",
+        "goal": "Icon editor MVP",
+        "deliverables": [
+          "create/edit/save 16x16 icons",
+          "private-use codepoint allocation",
+          "render icons in node layer"
+        ]
+      },
+      {
+        "phase": "P4",
+        "goal": "Hypertext navigation",
+        "deliverables": [
+          "anchors",
+          "jump regions",
+          "cross-page jump",
+          "cross-document jump by GUID + resolver",
+          "navigation history"
+        ]
+      },
+      {
+        "phase": "P5",
+        "goal": "File format + undo/redo",
+        "deliverables": [
+          "save/load full document JSON",
+          "undo/redo for core operations"
+        ]
+      }
+    ]
+  }
+}
