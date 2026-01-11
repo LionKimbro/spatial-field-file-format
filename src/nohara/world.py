@@ -29,15 +29,22 @@ def draw_grid(screen):
     start_x = data.CAM["x"] - cols // 2
     start_y = data.CAM["y"] - rows // 2
 
-    # Vertical lines
+    # Vertical lines (cell + node)
     for i in range(cols):
         cx = start_x + i
         sx, _ = cell_to_screen(cx, data.CAM["y"])
-        color = NODE_GRID_COLOR if cx % 2 == 0 else GRID_COLOR
-        pygame.draw.line(screen, color, (sx, 0), (sx, data.SCREEN_H))
 
-    # Horizontal lines
+        if cx % 2 == 0:
+            color = NODE_GRID_COLOR
+            width = 2
+        else:
+            color = GRID_COLOR
+            width = 1
+
+        pygame.draw.line(screen, color, (sx, 0), (sx, data.SCREEN_H), width)
+
+    # Horizontal lines (cells only for now)
     for j in range(rows):
         cy = start_y + j
         _, sy = cell_to_screen(data.CAM["x"], cy)
-        pygame.draw.line(screen, GRID_COLOR, (0, sy), (data.SCREEN_W, sy))
+        pygame.draw.line(screen, GRID_COLOR, (0, sy), (data.SCREEN_W, sy), 1)
